@@ -346,51 +346,24 @@ class VoxelGrid(EventRepresentation):
         with torch.no_grad():
             self.voxel_grid = self.voxel_grid.to(pol.device)
             voxel_grid = self.voxel_grid.clone()
-            # 对timestamp归一化
             t_norm = time
             t_norm = (C - 1) * (t_norm-t_norm[0]) / (t_norm[-1]-t_norm[0])
-
-            # x,y,t坐标取整
             x0 = x.int()
             y0 = y.int()
             t0 = t_norm.int()
 
             value = 2*pol-1
-            # value = pol
-
-            # 将事件插值到相邻的8个点当中
-            # for xlim in [x0,x0+1]:
-            #     for ylim in [y0,y0+1]:
-            #         for tlim in [t0,t0+1]:
-
-            #             mask = (xlim < W) & (xlim >= 0) & (ylim < H) & (ylim >= 0) & (tlim >= 0) & (tlim < self.nb_channels)
-            #             # 计算插值
-            #             # 离插值点的距离越小，值越大
-            #             interp_weights = value * (1 - (xlim-x).abs()) * (1 - (ylim-y).abs()) * (1 - (tlim - t_norm).abs())
-
-            #             # 计算索引值
-            #             index = H * W * tlim.long() + \
-            #                     W * ylim.long() + \
-            #                     xlim.long()
-            #             # 按索引赋值，相加
-            #             voxel_grid.put_(index[mask], interp_weights[mask], accumulate=True)
-
-            # 将事件插值到相邻的两个点(时间维度)当中
+            
             for tlim in [t0,t0+1]:
 
                 mask = (tlim >= 0) & (tlim < self.nb_channels)
-                # 计算插值
-                # 离插值点的距离越小，值越大
                 interp_weights = value * (1 - (tlim - t_norm).abs())
 
-                # 计算索引值
                 index = H * W * tlim.long() + \
                         W * y0.long() + \
                         x0.long()
-                # 按索引赋值，相加
                 voxel_grid.put_(index[mask], interp_weights[mask], accumulate=True)
 
-            #进行归一化
             if self.normalize:
                 mask = torch.nonzero(voxel_grid, as_tuple=True)
                 if mask[0].size()[0] > 0:
@@ -418,216 +391,8 @@ def events_to_voxel_grid(x, y, p, t, device: str='cpu'):
                 torch.from_numpy(y),
                 torch.from_numpy(pol),
                 torch.from_numpy(t))
-def DiT(event_tensor):
-    # Accumulate events to create a 2 * H * W image
-    DISC_ALPHA = 3.0
-    CLIP_COUNT_RATE = 0.99
-    H = 480
-    W = 640
-    # event_tensor[event_tensor[:, 0] < 0] = 0 
-    # event_tensor[event_tensor[:, 0] >= W] = W - 1 
-    # event_tensor[event_tensor[:, 1] < 0] = 0 
-    # event_tensor[event_tensor[:, 1] >= H] = H - 1
 
 
-    pos = event_tensor[event_tensor[:, 3] > 0]
-    neg = event_tensor[event_tensor[:, 3] < 0]
-    # print('x:{}'.format(pos[:, 0]))
-    # print(pos[:, 0])
-    # print('y:{}'.format(pos[:, 1]))
-    # print(pos[:, 1])
-    # Get pos, neg counts
-    pos_count = torch.bincount(pos[:, 0].long() + pos[:, 1].long() * W, minlength=H * W).reshape(H, W)
-    pos_count = pos_count.float()
-
-    neg_count = torch.bincount(neg[:, 0].long() + neg[:, 1].long() * W, minlength=H * W).reshape(H, W)
-    neg_count = neg_count.float()
-
-    # clip count
-    pos_unique_count = torch.unique(pos_count, return_counts=True)[1]
-    pos_sum_subset = torch.cumsum(pos_unique_count, dim=0)
-    pos_th_clip = pos_sum_subset[pos_sum_subset < H * W * CLIP_COUNT_RATE].shape[0]
-    pos_count[pos_count > pos_th_clip] = pos_th_clip
-
-    neg_unique_count = torch.unique(neg_count, return_counts=True)[1]
-    neg_sum_subset = torch.cumsum(neg_unique_count, dim=0)
-    neg_th_clip = neg_sum_subset[neg_sum_subset < H * W * CLIP_COUNT_RATE].shape[0]
-    neg_count[neg_count > neg_th_clip] = neg_th_clip
-
-    start_time = event_tensor[0, 2]
-    time_length = event_tensor[-1, 2] - event_tensor[0, 2]
-
-    norm_pos_time = (pos[:, 2] - start_time) / time_length
-    norm_neg_time = (neg[:, 2] - start_time) / time_length
-
-    # Get pos, neg time
-    pos_idx = pos[:, 0].long() + pos[:, 1].long() * W
-    neg_idx = neg[:, 0].long() + neg[:, 1].long() * W
-    pos_out, _ = scatter_max(norm_pos_time, pos_idx, dim=-1, dim_size=H * W)
-    pos_min_out, _ = scatter_min(norm_pos_time, pos_idx, dim=-1, dim_size=H * W)
-    pos_out = pos_out.reshape(H, W).float()
-    pos_min_out = pos_min_out.reshape(H, W).float()
-    neg_out, _ = scatter_max(norm_neg_time, neg_idx, dim=-1, dim_size=H * W)
-    neg_min_out, _ = scatter_min(norm_neg_time, neg_idx, dim=-1, dim_size=H * W)
-    neg_out = neg_out.reshape(H, W).float()
-    neg_min_out = neg_min_out.reshape(H, W).float()
-
-    pos_min_out[pos_count == 0] = 1.0
-    neg_min_out[neg_count == 0] = 1.0
-
-    # Get temporal discount
-    pos_disc = torch.zeros_like(pos_count)
-    neg_disc = torch.zeros_like(neg_count)
-
-    patch_size = 5
-
-    pos_neighbor_count = patch_size ** 2 * torch.nn.functional.avg_pool2d(pos_count.unsqueeze(0), patch_size, stride=1, padding=patch_size // 2)
-    neg_neighbor_count = patch_size ** 2 * torch.nn.functional.avg_pool2d(neg_count.unsqueeze(0), patch_size, stride=1, padding=patch_size // 2)
-
-    pos_disc = (torch.nn.functional.max_pool2d(pos_out.unsqueeze(0), patch_size, stride=1, padding=patch_size // 2) + 
-        torch.nn.functional.max_pool2d(-pos_min_out.unsqueeze(0), patch_size, stride=1, padding=patch_size // 2)) / \
-        (pos_neighbor_count)
-    neg_disc = (torch.nn.functional.max_pool2d(neg_out.unsqueeze(0), patch_size, stride=1, padding=patch_size // 2) + 
-        torch.nn.functional.max_pool2d(-neg_min_out.unsqueeze(0), patch_size, stride=1, padding=patch_size // 2)) / \
-        (neg_neighbor_count)
-
-    pos_out[pos_count > 0] = (pos_out[pos_count > 0] - DISC_ALPHA * pos_disc.squeeze()[pos_count > 0])
-    pos_out[pos_out < 0] = 0
-    pos_out[pos_neighbor_count.squeeze() == 1.0] = 0
-    neg_out[neg_count > 0] = (neg_out[neg_count > 0] - DISC_ALPHA * neg_disc.squeeze()[neg_count > 0])
-    neg_out[neg_out < 0] = 0
-    neg_out[neg_neighbor_count.squeeze() == 1.0] = 0
-
-    # pos_out = pos_out.reshape(H * W)
-    # neg_out = neg_out.reshape(H * W)
-
-    # pos_val, pos_idx = torch.sort(pos_out)
-    # neg_val, neg_idx = torch.sort(neg_out)
-    
-    # pos_unq, pos_cnt = torch.unique_consecutive(pos_val, return_counts=True)
-    # neg_unq, neg_cnt = torch.unique_consecutive(neg_val, return_counts=True)
-
-    # pos_sort = torch.zeros_like(pos_out)
-    # neg_sort = torch.zeros_like(neg_out)
-
-    # pos_sort[pos_idx] = torch.repeat_interleave(torch.arange(pos_unq.shape[0]), pos_cnt).float() / pos_unq.shape[0]
-    # neg_sort[neg_idx] = torch.repeat_interleave(torch.arange(neg_unq.shape[0]), neg_cnt).float() / neg_unq.shape[0]
-
-    # pos_sort = pos_sort.reshape(H, W)
-    # neg_sort = neg_sort.reshape(H, W)
-
-    # result = torch.stack([pos_sort, neg_sort], dim=2)
-    result = torch.stack([pos_out, neg_out], dim=2)
-    # print(np.array(result).shape)
-    result = result.permute(2, 0, 1)
-    result = result.float()
-
-    return result
-#DiST
-def reshape_then_acc_adj_sort(event_tensor):
-    # Accumulate events to create a 2 * H * W image
-    DISC_ALPHA = 3.0
-    CLIP_COUNT_RATE = 0.99
-    H = 260
-    W = 346
-    # event_tensor[event_tensor[:, 0] < 0] = 0 
-    # event_tensor[event_tensor[:, 0] >= W] = W - 1 
-    # event_tensor[event_tensor[:, 1] < 0] = 0 
-    # event_tensor[event_tensor[:, 1] >= H] = H - 1
-
-
-    pos = event_tensor[event_tensor[:, 3] > 0]
-    neg = event_tensor[event_tensor[:, 3] < 0]
-    # print('x:{}'.format(pos[:, 0]))
-    # print(pos[:, 0])
-    # print('y:{}'.format(pos[:, 1]))
-    # print(pos[:, 1])
-    # Get pos, neg counts
-    pos_count = torch.bincount(pos[:, 0].long() + pos[:, 1].long() * W, minlength=H * W).reshape(H, W)
-    pos_count = pos_count.float()
-
-    neg_count = torch.bincount(neg[:, 0].long() + neg[:, 1].long() * W, minlength=H * W).reshape(H, W)
-    neg_count = neg_count.float()
-
-    # clip count
-    pos_unique_count = torch.unique(pos_count, return_counts=True)[1]
-    pos_sum_subset = torch.cumsum(pos_unique_count, dim=0)
-    pos_th_clip = pos_sum_subset[pos_sum_subset < H * W * CLIP_COUNT_RATE].shape[0]
-    pos_count[pos_count > pos_th_clip] = pos_th_clip
-
-    neg_unique_count = torch.unique(neg_count, return_counts=True)[1]
-    neg_sum_subset = torch.cumsum(neg_unique_count, dim=0)
-    neg_th_clip = neg_sum_subset[neg_sum_subset < H * W * CLIP_COUNT_RATE].shape[0]
-    neg_count[neg_count > neg_th_clip] = neg_th_clip
-
-    start_time = event_tensor[0, 2]
-    time_length = event_tensor[-1, 2] - event_tensor[0, 2]
-
-    norm_pos_time = (pos[:, 2] - start_time) / time_length
-    norm_neg_time = (neg[:, 2] - start_time) / time_length
-
-    # Get pos, neg time
-    pos_idx = pos[:, 0].long() + pos[:, 1].long() * W
-    neg_idx = neg[:, 0].long() + neg[:, 1].long() * W
-    pos_out, _ = scatter_max(norm_pos_time, pos_idx, dim=-1, dim_size=H * W)
-    pos_min_out, _ = scatter_min(norm_pos_time, pos_idx, dim=-1, dim_size=H * W)
-    pos_out = pos_out.reshape(H, W).float()
-    pos_min_out = pos_min_out.reshape(H, W).float()
-    neg_out, _ = scatter_max(norm_neg_time, neg_idx, dim=-1, dim_size=H * W)
-    neg_min_out, _ = scatter_min(norm_neg_time, neg_idx, dim=-1, dim_size=H * W)
-    neg_out = neg_out.reshape(H, W).float()
-    neg_min_out = neg_min_out.reshape(H, W).float()
-
-    pos_min_out[pos_count == 0] = 1.0
-    neg_min_out[neg_count == 0] = 1.0
-
-    # Get temporal discount
-    pos_disc = torch.zeros_like(pos_count)
-    neg_disc = torch.zeros_like(neg_count)
-
-    patch_size = 5
-
-    pos_neighbor_count = patch_size ** 2 * torch.nn.functional.avg_pool2d(pos_count.unsqueeze(0), patch_size, stride=1, padding=patch_size // 2)
-    neg_neighbor_count = patch_size ** 2 * torch.nn.functional.avg_pool2d(neg_count.unsqueeze(0), patch_size, stride=1, padding=patch_size // 2)
-
-    pos_disc = (torch.nn.functional.max_pool2d(pos_out.unsqueeze(0), patch_size, stride=1, padding=patch_size // 2) + 
-        torch.nn.functional.max_pool2d(-pos_min_out.unsqueeze(0), patch_size, stride=1, padding=patch_size // 2)) / \
-        (pos_neighbor_count)
-    neg_disc = (torch.nn.functional.max_pool2d(neg_out.unsqueeze(0), patch_size, stride=1, padding=patch_size // 2) + 
-        torch.nn.functional.max_pool2d(-neg_min_out.unsqueeze(0), patch_size, stride=1, padding=patch_size // 2)) / \
-        (neg_neighbor_count)
-
-    pos_out[pos_count > 0] = (pos_out[pos_count > 0] - DISC_ALPHA * pos_disc.squeeze()[pos_count > 0])
-    pos_out[pos_out < 0] = 0
-    pos_out[pos_neighbor_count.squeeze() == 1.0] = 0
-    neg_out[neg_count > 0] = (neg_out[neg_count > 0] - DISC_ALPHA * neg_disc.squeeze()[neg_count > 0])
-    neg_out[neg_out < 0] = 0
-    neg_out[neg_neighbor_count.squeeze() == 1.0] = 0
-
-    pos_out = pos_out.reshape(H * W)
-    neg_out = neg_out.reshape(H * W)
-
-    pos_val, pos_idx = torch.sort(pos_out)
-    neg_val, neg_idx = torch.sort(neg_out)
-    
-    pos_unq, pos_cnt = torch.unique_consecutive(pos_val, return_counts=True)
-    neg_unq, neg_cnt = torch.unique_consecutive(neg_val, return_counts=True)
-
-    pos_sort = torch.zeros_like(pos_out)
-    neg_sort = torch.zeros_like(neg_out)
-
-    pos_sort[pos_idx] = torch.repeat_interleave(torch.arange(pos_unq.shape[0]), pos_cnt).float() / pos_unq.shape[0]
-    neg_sort[neg_idx] = torch.repeat_interleave(torch.arange(neg_unq.shape[0]), neg_cnt).float() / neg_unq.shape[0]
-
-    pos_sort = pos_sort.reshape(H, W)
-    neg_sort = neg_sort.reshape(H, W)
-
-    result = torch.stack([pos_sort, neg_sort], dim=2)
-    # print(np.array(result).shape)
-    result = result.permute(2, 0, 1)
-    result = result.float()
-
-    return result
 # Timestamp Image
 def reshape_then_acc_time_pol(event_tensor):
     # Accumulate events to create a 2 * H * W image
@@ -635,10 +400,6 @@ def reshape_then_acc_time_pol(event_tensor):
     H = 480
     W = 640
 
-    # event_tensor[event_tensor[:, 0] < 0] = 0 
-    # event_tensor[event_tensor[:, 0] >= W] = W - 1 
-    # event_tensor[event_tensor[:, 1] < 0] = 0 
-    # event_tensor[event_tensor[:, 1] >= H] = H - 1
 
     # Account for empty events
     if len(event_tensor) == 0:
@@ -674,17 +435,12 @@ def reshape_then_acc_time(event_tensor):
     H = 480
     W = 640
 
-    # event_tensor[event_tensor[:, 0] < 0] = 0 
-    # event_tensor[event_tensor[:, 0] >= W] = W - 1 
-    # event_tensor[event_tensor[:, 1] < 0] = 0 
-    # event_tensor[event_tensor[:, 1] >= H] = H - 1
 
     # Account for empty events
     if len(event_tensor) == 0:
         event_tensor = torch.zeros([10, 4]).float()
         event_tensor[:, 2] = torch.arange(10) / 10.
         event_tensor[:, -1] = 1
-
 
 
     start_time = event_tensor[0, 2]
@@ -707,20 +463,13 @@ def reshape_then_acc_count_only(event_tensor):
     H = 480
     W = 640
 
-    # event_tensor[event_tensor[:, 0] < 0] = 0 
-    # event_tensor[event_tensor[:, 0] >= W] = W - 1 
-    # event_tensor[event_tensor[:, 1] < 0] = 0 
-    # event_tensor[event_tensor[:, 1] >= H] = H - 1
     pos = event_tensor[event_tensor[:, 3] > 0]
     neg = event_tensor[event_tensor[:, 3] < 0]
     pos_count = torch.bincount(pos[:, 0].long() + pos[:, 1].long() * W, minlength=H * W).reshape(H, W)
     neg_count = torch.bincount(neg[:, 0].long() + neg[:, 1].long() * W, minlength=H * W).reshape(H, W)
 
     # Get pos, neg counts
-    # event_count = torch.bincount(event_tensor[:, 0].long() + event_tensor[:, 1].long() * W, minlength=H * W).reshape(H, W)
-
-    # result = torch.unsqueeze(event_count, -1)
-
+    
     result = torch.stack([pos_count, neg_count], dim=2)
 
     result = result.permute(2, 0, 1)
