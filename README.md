@@ -37,6 +37,15 @@ The code for homographic transformation of RGB images to Event frame can be foun
 
 - Run ./datasets/convert_dsecdet_to_yolox.py to generate COCO json files.
 
+- Download RSGNet model.
+Link: https://drive.google.com/file/d/1P3lSLccasQ79EKmMk-MpAb4Wo9rU-XNq/view?usp=drive_link
+
+Generating SIF:
+```Bash
+cd RSGNet
+python3 test.py
+```
+
 - Download model.
 Link: https://pan.baidu.com/s/1yPdmGKEs_tpeeI7gI0Subw
 Password: jtd7
